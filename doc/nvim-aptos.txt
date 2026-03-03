@@ -1,198 +1,177 @@
-*nvim-aptos.txt*	A comprehensive Neovim plugin for Aptos Move language development
+*nvim-aptos.txt*  Aptos Move development plugin for Neovim
 
 ==============================================================================
-CONTENTS					*nvim-aptos-contents*
+CONTENTS                                              *nvim-aptos-contents*
 
-Introduction		|nvim-aptos-introduction|
-Installation		|nvim-aptos-installation|
-Configuration		|nvim-aptos-configuration|
-Features			|nvim-aptos-features|
-Commands			|nvim-aptos-commands|
-Keymaps			|nvim-aptos-keymaps|
-Troubleshooting		|nvim-aptos-troubleshooting|
-
-==============================================================================
-INTRODUCTION					*nvim-aptos-introduction*
-
-nvim-aptos is a comprehensive Neovim plugin that provides full support for
-developing Aptos Move smart contracts. It includes syntax highlighting, LSP
-integration, error diagnostics, and CLI integration.
-
-Features:
-- Syntax highlighting for Move language
-- Jump to definition and code navigation
-- Real-time error detection and highlighting
-- Aptos CLI integration for build, test, and deploy
-- Account and network management
+Introduction ......................................... |nvim-aptos|
+Requirements ......................................... |nvim-aptos-requirements|
+Setup ................................................ |nvim-aptos-setup|
+Configuration ........................................ |nvim-aptos-config|
+Commands ............................................. |nvim-aptos-commands|
+Keymaps .............................................. |nvim-aptos-keymaps|
+Modules .............................................. |nvim-aptos-modules|
+Health Check ......................................... |nvim-aptos-health|
 
 ==============================================================================
-INSTALLATION					*nvim-aptos-installation*
+INTRODUCTION                                          *nvim-aptos*
 
-Using packer.nvim:
->
-    use {
-        'your-username/nvim-aptos',
-        requires = {
-            'nvim-lspconfig',
-            'nvim-treesitter',
-            'plenary.nvim',
-        }
-    }
+nvim-aptos provides a complete Aptos Move development environment for
+Neovim 0.10+. Features include:
+
+- Tree-sitter syntax highlighting (move_on_aptos parser)
+- LSP integration via move-analyzer (lspconfig or native 0.11+)
+- Aptos CLI commands (build, test, publish, init)
+- Move Prover integration (formal verification)
+- On-chain resource explorer
+- Gas estimation via transaction simulation
+
+==============================================================================
+REQUIREMENTS                                          *nvim-aptos-requirements*
+
+Required:
+- Neovim >= 0.10
+
+Recommended:
+- `move-analyzer` on PATH (LSP features)
+- `aptos` CLI on PATH (CLI, prover, explorer, gas features)
+- `move_on_aptos` tree-sitter parser (syntax highlighting)
+- `nvim-lspconfig` OR Neovim >= 0.11 (LSP configuration)
+
+==============================================================================
+SETUP                                                 *nvim-aptos-setup*
+
+Minimal: >lua
+    require("nvim-aptos").setup()
 <
 
-Using lazy.nvim:
->
-    {
-        'your-username/nvim-aptos',
-        dependencies = {
-            'nvim-lspconfig',
-            'nvim-treesitter',
-            'plenary.nvim',
-        },
-        config = function()
-            require('nvim-aptos').setup()
-        end
-    }
+With lazy.nvim: >lua
+    { "gregnazario/nvim-aptos", ft = "move", opts = {} }
 <
-
-Requirements:
-- Neovim 0.8.0+
-- Aptos CLI installed and in PATH
-- Move Analyzer LSP server (optional)
 
 ==============================================================================
-CONFIGURATION					*nvim-aptos-configuration*
+CONFIGURATION                                         *nvim-aptos-config*
 
-Basic setup:
->
-    require('nvim-aptos').setup()
-<
-
-Advanced configuration:
->
-    require('nvim-aptos').setup({
-        syntax = {
-            enable_treesitter = true,
-            enable_traditional = false,
-            custom_highlights = {},
-            fold_method = "treesitter",
+All options with defaults: >lua
+    require("nvim-aptos").setup({
+      syntax = {
+        enable = true,       -- tree-sitter highlighting
+        folds = true,        -- tree-sitter folding
+      },
+      lsp = {
+        enable = true,
+        cmd = { "move-analyzer" },
+        keymaps = {
+          definition = "gd",       -- false to disable
+          references = "gr",
+          hover = "K",
+          rename = "<leader>rn",
+          code_action = "<leader>ca",
         },
-        lsp = {
-            enable = true,
-            server = "move_analyzer",
-            settings = {
-                diagnostics = { enable = true, experimental = true },
-                hover = { enable = true },
-                completion = { enable = true },
-            },
+      },
+      cli = {
+        enable = true,
+        aptos_path = "aptos",
+        keymaps = {
+          build = "<leader>ab",
+          test = "<leader>at",
+          publish = "<leader>ap",
         },
-        diagnostics = {
-            enable = true,
-            realtime = true,
-            debounce_time = 500,
-            display = {
-                virtual_text = true,
-                signs = true,
-                underline = true,
-            },
-        },
-        cli = {
-            enable = true,
-            aptos_path = "aptos",
-            default_network = "devnet",
-            timeout = 30000,
-        }
+      },
+      prover = {
+        enable = true,
+        keymap = "<leader>av",
+      },
+      explorer = {
+        enable = true,
+        keymap = "<leader>ae",
+      },
+      gas = {
+        enable = true,
+        keymap = "<leader>ag",
+      },
     })
 <
 
 ==============================================================================
-FEATURES					*nvim-aptos-features*
+COMMANDS                                              *nvim-aptos-commands*
 
-1. Syntax Highlighting
-   - Full Move language syntax support
-   - Tree-sitter integration
-   - Custom highlighting for Move constructs
-   - Syntax-aware folding
+All commands are buffer-local to Move files.
 
-2. Language Server Protocol (LSP)
-   - Jump to definition
-   - Go to references
-   - Hover information
-   - Code completion
-   - Symbol search
+:AptosBuild                                           *:AptosBuild*
+    Compile the Move package in the current project.
 
-3. Error Diagnostics
-   - Real-time error detection
-   - Error categorization
-   - Quick fixes
-   - Error navigation
+:AptosTest [filter]                                   *:AptosTest*
+    Run unit tests. Optional [filter] limits to matching test names.
 
-4. CLI Integration
-   - Build Move projects
-   - Run tests
-   - Deploy modules
-   - Account management
-   - Network switching
+:AptosPublish                                         *:AptosPublish*
+    Publish Move modules. Prompts for confirmation.
 
-==============================================================================
-COMMANDS					*nvim-aptos-commands*
+:AptosInit [name]                                     *:AptosInit*
+    Initialize a new Move project. Prompts for name if omitted.
 
-:AptosBuild			Build the current Move project
-:AptosTest			Run tests for the current project
-:AptosDeploy			Deploy modules to the network
-:AptosAccount			Show account information
-:AptosNetwork {network}		Switch to specified network
-:AptosInit [name]		Initialize a new Move project
-:AptosAdd [dependency]		Add a dependency to the project
+:AptosAccount                                         *:AptosAccount*
+    Display account information in a floating window.
+
+:AptosNetwork [network]                               *:AptosNetwork*
+    Switch network. If omitted, presents a selection menu.
+    Valid networks: devnet, testnet, mainnet, local.
+
+:AptosProve [function]                                *:AptosProve*
+    Run the Move Prover. Optionally filter by function name.
+    Verification errors are sent to the quickfix list.
+
+:AptosExplore [address]                               *:AptosExplore*
+    Browse on-chain resources for an account. If address is omitted,
+    reads from .aptos/config.yaml or prompts for input.
+
+:AptosGas                                             *:AptosGas*
+    Simulate a publish transaction and display estimated gas cost.
 
 ==============================================================================
-KEYMAPS					*nvim-aptos-keymaps*
+KEYMAPS                                               *nvim-aptos-keymaps*
 
-LSP Navigation:
-gd				Go to definition
-gr				Go to references
-K				Hover information
-<leader>rn			Rename symbol
-<leader>ca			Code actions
+All keymaps are buffer-local to Move files. Set any keymap to `false`
+in the config to disable it.
 
-Diagnostics:
-[d				Previous diagnostic
-]d				Next diagnostic
-<leader>e			Show diagnostic float
-<leader>f			Quick fix
+LSP keymaps (requires move-analyzer):
+  `gd`            Go to definition
+  `gr`            Find references
+  `K`             Hover documentation
+  `<leader>rn`    Rename symbol
+  `<leader>ca`    Code action
 
-CLI Commands:
-<leader>ab			Build project
-<leader>at			Run tests
-<leader>ad			Deploy modules
-<leader>aa			Show account info
-<leader>as			Switch network
+CLI keymaps:
+  `<leader>ab`    Build project
+  `<leader>at`    Run tests
+  `<leader>ap`    Publish modules
 
-File-specific (Move files):
-<leader>b			Build project
-<leader>t			Run tests
-<leader>d			Deploy modules
-<leader>a			Show account info
-<leader>s			Switch network
+Other keymaps:
+  `<leader>av`    Run Move Prover
+  `<leader>ae`    Explore on-chain resources
+  `<leader>ag`    Estimate gas
 
 ==============================================================================
-TROUBLESHOOTING				*nvim-aptos-troubleshooting*
+MODULES                                               *nvim-aptos-modules*
 
-1. Aptos CLI not found
-   - Ensure aptos CLI is installed and in PATH
-   - Run: which aptos
+The plugin exposes a public API:
 
-2. LSP not working
-   - Install move-analyzer: cargo install move-analyzer
-   - Check LSP status: :LspInfo
-
-3. Syntax highlighting not working
-   - Install nvim-treesitter
-   - Install move grammar: :TSInstall move
-
-4. Commands not available
-   - Ensure plugin is properly loaded
-   - Check for error messages in :checkhealth
+  `require("nvim-aptos").build()`            Build project
+  `require("nvim-aptos").test(filter?)`      Run tests
+  `require("nvim-aptos").publish()`          Publish modules
+  `require("nvim-aptos").prove(func?)`       Run prover
+  `require("nvim-aptos").explore(addr?)`     Explore resources
+  `require("nvim-aptos").estimate_gas()`     Estimate gas
 
 ==============================================================================
-vim:tw=78:ts=8:ft=help:norl:noet:fen:fdl=0: 
+HEALTH CHECK                                          *nvim-aptos-health*
+
+Run `:checkhealth nvim-aptos` to verify:
+
+- Neovim version >= 0.10
+- move-analyzer binary on PATH
+- aptos CLI on PATH
+- move_on_aptos tree-sitter parser installed
+- LSP config method available (lspconfig or Neovim >= 0.11)
+
+==============================================================================
+vim:tw=78:ts=8:ft=help:norl:noet:fen:fdl=0:

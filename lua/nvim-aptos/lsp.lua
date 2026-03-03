@@ -1,145 +1,69 @@
 local M = {}
+local util = require("nvim-aptos.util")
 
-local lspconfig = require('lspconfig')
-local api = vim.api
-
--- LSP configuration for Move
-M.setup_lsp = function(config)
-    local default_config = {
-        capabilities = M.get_capabilities(),
-        on_attach = M.on_attach,
-        settings = {
-            move = {
-                -- Move-specific LSP settings
-                diagnostics = {
-                    enable = true,
-                    experimental = true,
-                },
-                hover = {
-                    enable = true,
-                },
-                completion = {
-                    enable = true,
-                },
-            }
-        }
-    }
-    
-    -- Merge user config with defaults
-    config = vim.tbl_deep_extend("force", default_config, config or {})
-    
-    -- Setup custom LSP server if needed
-    M.setup_custom_server()
-    
-    -- Setup LSP for Move files
-    lspconfig.move_analyzer.setup(config)
-end
-
--- Get LSP capabilities
-M.get_capabilities = function()
-    local capabilities = vim.lsp.protocol.make_client_capabilities()
-    
-    -- Try to get capabilities from cmp if available
-    local status_ok, cmp_lsp = pcall(require, 'cmp_nvim_lsp')
-    if status_ok then
-        capabilities = cmp_lsp.default_capabilities()
+local function set_keymaps(buf, keymaps)
+  local mappings = {
+    { keymaps.definition, vim.lsp.buf.definition, "Go to definition" },
+    { keymaps.references, vim.lsp.buf.references, "Find references" },
+    { keymaps.hover, vim.lsp.buf.hover, "Hover documentation" },
+    { keymaps.rename, vim.lsp.buf.rename, "Rename symbol" },
+    { keymaps.code_action, vim.lsp.buf.code_action, "Code action" },
+  }
+  for _, m in ipairs(mappings) do
+    if m[1] and m[1] ~= false then
+      vim.keymap.set("n", m[1], m[2], { buffer = buf, desc = "Aptos: " .. m[3] })
     end
-    
-    return capabilities
+  end
 end
 
--- LSP attach function
-M.on_attach = function(client, bufnr)
-    local opts = { buffer = bufnr, silent = true }
-    
-    -- Key mappings for LSP features
-    vim.keymap.set('n', 'gd', vim.lsp.buf.definition, opts)
-    vim.keymap.set('n', 'gr', vim.lsp.buf.references, opts)
-    vim.keymap.set('n', 'K', vim.lsp.buf.hover, opts)
-    vim.keymap.set('n', '<C-k>', vim.lsp.buf.signature_help, opts)
-    vim.keymap.set('n', '<leader>rn', vim.lsp.buf.rename, opts)
-    vim.keymap.set('n', '<leader>ca', vim.lsp.buf.code_action, opts)
-    vim.keymap.set('n', '<leader>ds', vim.lsp.buf.document_symbol, opts)
-    vim.keymap.set('n', '<leader>ws', vim.lsp.buf.workspace_symbol, opts)
-    
-    -- Format on save
-    vim.api.nvim_create_autocmd("BufWritePre", {
-        buffer = bufnr,
-        callback = function()
-            vim.lsp.buf.format()
-        end,
+function M.setup(config)
+  local lsp_config = config.lsp
+  local cmd = lsp_config.cmd or { "move-analyzer" }
+
+  -- Check if move-analyzer is available
+  if vim.fn.executable(cmd[1]) == 0 then
+    util.notify(cmd[1] .. " not found on PATH. LSP features disabled.", vim.log.levels.WARN)
+    return
+  end
+
+  local has_lspconfig, lspconfig = pcall(require, "lspconfig")
+
+  if has_lspconfig then
+    -- Path 1: nvim-lspconfig
+    lspconfig.move_analyzer.setup({
+      cmd = cmd,
+      filetypes = { "move" },
+      root_dir = function(fname)
+        return lspconfig.util.root_pattern("Move.toml")(fname)
+      end,
+      settings = lsp_config.settings or {},
+      on_attach = function(_, bufnr)
+        set_keymaps(bufnr, lsp_config.keymaps)
+      end,
     })
-    
-    -- Show diagnostic on hover
-    vim.api.nvim_create_autocmd("CursorHold", {
-        buffer = bufnr,
-        callback = function()
-            local opts = {
-                focusable = false,
-                close_events = { "BufLeave", "CursorMoved", "InsertEnter", "FocusLost" },
-                border = 'rounded',
-                source = 'always',
-                prefix = ' ',
-                scope = 'cursor',
-            }
-            vim.diagnostic.open_float(nil, opts)
-        end
+  elseif vim.fn.has("nvim-0.11") == 1 then
+    -- Path 2: native Neovim 0.11+ LSP config
+    vim.lsp.config("move_analyzer", {
+      cmd = cmd,
+      filetypes = { "move" },
+      root_markers = { "Move.toml" },
+      settings = lsp_config.settings or {},
     })
-end
+    vim.lsp.enable("move_analyzer")
 
--- Setup custom LSP server
-M.setup_custom_server = function()
-    local config = require('lspconfig.configs')
-    
-    if not config.move_analyzer then
-        config.move_analyzer = {
-            default_config = {
-                cmd = { "move-analyzer" },
-                filetypes = { "move" },
-                root_dir = function(fname)
-                    return require('lspconfig.util').root_pattern("Move.toml")(fname)
-                end,
-                settings = {},
-            },
-        }
-    end
-end
-
--- Get LSP client for current buffer
-M.get_client = function()
-    local clients = vim.lsp.get_active_clients({ bufnr = 0 })
-    for _, client in ipairs(clients) do
-        if client.name == "move_analyzer" then
-            return client
+    -- Set keymaps via autocmd for native path
+    vim.api.nvim_create_autocmd("LspAttach", {
+      group = vim.api.nvim_create_augroup("NvimAptosLsp", { clear = true }),
+      callback = function(args)
+        local client = vim.lsp.get_client_by_id(args.data.client_id)
+        if client and client.name == "move_analyzer" then
+          set_keymaps(args.buf, lsp_config.keymaps)
         end
-    end
-    return nil
+      end,
+    })
+  else
+    util.notify("LSP requires nvim-lspconfig or Neovim >= 0.11", vim.log.levels.WARN)
+  end
 end
 
--- Check if LSP is attached to current buffer
-M.is_attached = function()
-    return M.get_client() ~= nil
-end
-
--- Restart LSP
-M.restart = function()
-    local client = M.get_client()
-    if client then
-        client.stop()
-        vim.defer_fn(function()
-            M.setup_lsp()
-        end, 100)
-    end
-end
-
--- Get LSP status
-M.get_status = function()
-    local client = M.get_client()
-    if client then
-        return "move_analyzer: " .. client.state
-    else
-        return "move_analyzer: not attached"
-    end
-end
-
-return M 
+return M

@@ -1,498 +1,229 @@
 local M = {}
+local util = require("nvim-aptos.util")
 
-local api = vim.api
-local job = vim.fn.jobstart
+local aptos_path
+local keymaps
 
--- CLI configuration
-M.config = {
-    aptos_path = "aptos",
-    default_network = "devnet",
-    output_format = "json",
-    timeout = 30000, -- 30 seconds
-}
+--- Parse Aptos compiler errors into quickfix entries.
+--- Aptos errors use the format: ┌─ path/file.move:LINE:COL
+---@param output string combined stdout+stderr
+---@return table[] quickfix entries
+local function parse_errors(output)
+  local entries = {}
+  local current_text = nil
 
--- Setup CLI integration
-M.setup = function(config)
-    M.config = vim.tbl_deep_extend("force", M.config, config or {})
-    
-    -- Verify aptos CLI is available
-    M.verify_aptos_cli()
-    
-    -- Setup CLI commands
-    M.setup_commands()
-    
-    -- Setup keymaps
-    M.setup_keymaps()
-end
-
--- Verify aptos CLI is available
-M.verify_aptos_cli = function()
-    local handle = io.popen("which " .. M.config.aptos_path)
-    local result = handle:read("*a")
-    handle:close()
-    
-    if result == "" then
-        vim.notify("Aptos CLI not found. Please install aptos CLI.", vim.log.levels.ERROR)
-        return false
+  for line in output:gmatch("[^\r\n]+") do
+    -- Match error location: ┌─ or ├─ followed by path:line:col
+    local file, lnum, col = line:match("[┌├]─%s+(.+):(%d+):(%d+)")
+    if file and lnum then
+      if current_text then
+        table.insert(entries, {
+          filename = file,
+          lnum = tonumber(lnum),
+          col = tonumber(col),
+          text = current_text,
+        })
+      end
+      current_text = nil
     end
-    
-    return true
-end
 
--- Setup CLI commands
-M.setup_commands = function()
-    -- Build command
-    vim.api.nvim_create_user_command("AptosBuild", function()
-        M.build_project()
-    end, { desc = "Build Move project" })
-    
-    -- Test command
-    vim.api.nvim_create_user_command("AptosTest", function()
-        M.run_tests()
-    end, { desc = "Run Move tests" })
-    
-    -- Deploy command
-    vim.api.nvim_create_user_command("AptosDeploy", function()
-        M.deploy_modules()
-    end, { desc = "Deploy Move modules" })
-    
-    -- Account info command
-    vim.api.nvim_create_user_command("AptosAccount", function()
-        M.show_account_info()
-    end, { desc = "Show account information" })
-    
-    -- Network switch command
-    vim.api.nvim_create_user_command("AptosNetwork", function(opts)
-        M.switch_network(opts.args)
-    end, { desc = "Switch Aptos network", nargs = 1 })
-    
-    -- Init project command
-    vim.api.nvim_create_user_command("AptosInit", function(opts)
-        M.init_project(opts.args)
-    end, { desc = "Initialize Move project", nargs = "?" })
-    
-    -- Add dependency command
-    vim.api.nvim_create_user_command("AptosAdd", function(opts)
-        M.add_dependency(opts.args)
-    end, { desc = "Add dependency", nargs = "?" })
-end
-
--- Setup keymaps
-M.setup_keymaps = function()
-    local opts = { noremap = true, silent = true }
-    
-    -- Build and test
-    vim.keymap.set('n', '<leader>ab', M.build_project, opts)
-    vim.keymap.set('n', '<leader>at', M.run_tests, opts)
-    vim.keymap.set('n', '<leader>ad', M.deploy_modules, opts)
-    
-    -- Account management
-    vim.keymap.set('n', '<leader>aa', M.show_account_info, opts)
-    vim.keymap.set('n', '<leader>an', M.create_account, opts)
-    
-    -- Network operations
-    vim.keymap.set('n', '<leader>as', M.switch_network, opts)
-    vim.keymap.set('n', '<leader>ai', M.show_network_info, opts)
-    
-    -- Project management
-    vim.keymap.set('n', '<leader>ap', M.show_project_info, opts)
-end
-
--- Find project root (directory containing Move.toml)
-M.find_project_root = function()
-    local current_dir = vim.fn.getcwd()
-    local dir = current_dir
-    
-    while dir ~= "/" do
-        local move_toml = dir .. "/Move.toml"
-        local file = io.open(move_toml, "r")
-        if file then
-            file:close()
-            return dir
-        end
-        dir = vim.fn.fnamemodify(dir, ":h")
+    -- Match error/warning message lines
+    local msg = line:match("^error%[.*%]:%s*(.+)") or line:match("^error:%s*(.+)")
+    if msg then
+      current_text = msg
     end
-    
-    return nil
+  end
+
+  return entries
 end
 
--- Build Move project
-M.build_project = function()
-    local project_root = M.find_project_root()
-    if not project_root then
-        vim.notify("No Move.toml found in current directory or parents", vim.log.levels.ERROR)
-        return
+--- Run an aptos CLI command with standard output handling
+---@param cmd string[] command arguments (after "aptos")
+---@param opts { cwd?: string, on_success?: fun(stdout: string), title?: string }
+local function run_cmd(cmd, opts)
+  opts = opts or {}
+  local full_cmd = { aptos_path }
+  vim.list_extend(full_cmd, cmd)
+
+  local cwd = opts.cwd or util.find_project_root()
+
+  util.run_async(full_cmd, { cwd = cwd }, function(code, stdout, stderr)
+    local output = stdout .. stderr
+    if code == 0 then
+      if opts.on_success then
+        opts.on_success(output)
+      else
+        util.notify(opts.title or "Command completed", vim.log.levels.INFO)
+      end
+    else
+      local entries = parse_errors(output)
+      if #entries > 0 then
+        vim.fn.setqflist(entries, "r")
+        vim.cmd("copen")
+      end
+      -- Show output in floating window for context
+      local lines = vim.split(output, "\n", { trimempty = true })
+      if #lines > 0 then
+        util.open_float(lines, { title = opts.title or "Aptos Error" })
+      end
     end
-    
-    vim.notify("Building Move project...", vim.log.levels.INFO)
-    
-    local cmd = { M.config.aptos_path, "move", "build", "--package-dir", project_root }
-    
-    job(cmd, {
-        stdout_buffered = true,
-        stderr_buffered = true,
-        on_exit = function(_, exit_code, stdout, stderr)
-            if exit_code == 0 then
-                vim.notify("Build successful!", vim.log.levels.INFO)
-                M.parse_build_output(stdout)
-            else
-                vim.notify("Build failed!", vim.log.levels.ERROR)
-                M.parse_build_errors(stderr)
-            end
-        end,
+  end)
+end
+
+function M.setup(config)
+  aptos_path = config.cli.aptos_path or "aptos"
+  keymaps = config.cli.keymaps
+
+  local group = vim.api.nvim_create_augroup("NvimAptosCli", { clear = true })
+
+  vim.api.nvim_create_autocmd("FileType", {
+    group = group,
+    pattern = "move",
+    callback = function(args)
+      local buf = args.buf
+      local bopts = { buffer = buf }
+
+      -- Commands
+      vim.api.nvim_buf_create_user_command(buf, "AptosBuild", function()
+        M.build()
+      end, { desc = "Compile Move package" })
+
+      vim.api.nvim_buf_create_user_command(buf, "AptosTest", function(o)
+        M.test(o.args ~= "" and o.args or nil)
+      end, { desc = "Run Move tests", nargs = "?" })
+
+      vim.api.nvim_buf_create_user_command(buf, "AptosPublish", function()
+        M.publish()
+      end, { desc = "Publish Move modules" })
+
+      vim.api.nvim_buf_create_user_command(buf, "AptosInit", function(o)
+        M.init_project(o.args ~= "" and o.args or nil)
+      end, { desc = "Initialize Move project", nargs = "?" })
+
+      vim.api.nvim_buf_create_user_command(buf, "AptosAccount", function()
+        M.account()
+      end, { desc = "Show account info" })
+
+      vim.api.nvim_buf_create_user_command(buf, "AptosNetwork", function(o)
+        M.network(o.args ~= "" and o.args or nil)
+      end, { desc = "Switch Aptos network", nargs = "?" })
+
+      -- Keymaps
+      if keymaps.build then
+        vim.keymap.set("n", keymaps.build, M.build, vim.tbl_extend("force", bopts, { desc = "Aptos: Build" }))
+      end
+      if keymaps.test then
+        vim.keymap.set("n", keymaps.test, M.test, vim.tbl_extend("force", bopts, { desc = "Aptos: Test" }))
+      end
+      if keymaps.publish then
+        vim.keymap.set("n", keymaps.publish, M.publish, vim.tbl_extend("force", bopts, { desc = "Aptos: Publish" }))
+      end
+    end,
+  })
+end
+
+function M.build()
+  local root = util.find_project_root()
+  if not root then
+    util.notify("No Move.toml found", vim.log.levels.ERROR)
+    return
+  end
+  util.notify("Compiling...")
+  run_cmd({ "move", "compile", "--package-dir", root }, {
+    title = "Build",
+    on_success = function()
+      util.notify("Build succeeded", vim.log.levels.INFO)
+    end,
+  })
+end
+
+function M.test(filter)
+  local root = util.find_project_root()
+  if not root then
+    util.notify("No Move.toml found", vim.log.levels.ERROR)
+    return
+  end
+  local cmd = { "move", "test", "--package-dir", root }
+  if filter then
+    vim.list_extend(cmd, { "--filter", filter })
+  end
+  util.notify("Running tests...")
+  run_cmd(cmd, {
+    title = "Test",
+    on_success = function(output)
+      local lines = vim.split(output, "\n", { trimempty = true })
+      util.open_float(lines, { title = "Test Results" })
+    end,
+  })
+end
+
+function M.publish()
+  local root = util.find_project_root()
+  if not root then
+    util.notify("No Move.toml found", vim.log.levels.ERROR)
+    return
+  end
+  vim.ui.select({ "Yes", "No" }, { prompt = "Publish modules?" }, function(choice)
+    if choice ~= "Yes" then
+      return
+    end
+    util.notify("Publishing...")
+    run_cmd({ "move", "publish", "--package-dir", root }, {
+      title = "Publish",
+      on_success = function(output)
+        util.notify("Publish succeeded", vim.log.levels.INFO)
+      end,
     })
+  end)
 end
 
--- Run Move tests
-M.run_tests = function()
-    local project_root = M.find_project_root()
-    if not project_root then
-        vim.notify("No Move.toml found in current directory or parents", vim.log.levels.ERROR)
-        return
-    end
-    
-    vim.notify("Running Move tests...", vim.log.levels.INFO)
-    
-    local cmd = { M.config.aptos_path, "move", "test", "--package-dir", project_root }
-    
-    job(cmd, {
-        stdout_buffered = true,
-        stderr_buffered = true,
-        on_exit = function(_, exit_code, stdout, stderr)
-            if exit_code == 0 then
-                vim.notify("All tests passed!", vim.log.levels.INFO)
-                M.parse_test_output(stdout)
-            else
-                vim.notify("Some tests failed!", vim.log.levels.WARN)
-                M.parse_test_errors(stderr)
-            end
-        end,
-    })
-end
-
--- Deploy Move modules
-M.deploy_modules = function()
-    local project_root = M.find_project_root()
-    if not project_root then
-        vim.notify("No Move.toml found in current directory or parents", vim.log.levels.ERROR)
-        return
-    end
-    
-    -- Confirm deployment
-    vim.ui.select({ "Yes", "No" }, {
-        prompt = "Deploy modules to " .. M.get_current_network() .. "?",
-    }, function(choice)
-        if choice == "Yes" then
-            M.execute_deployment(project_root)
-        end
+function M.init_project(name)
+  if not name then
+    vim.ui.input({ prompt = "Project name: " }, function(input)
+      if input and input ~= "" then
+        M.init_project(input)
+      end
     end)
+    return
+  end
+  run_cmd({ "move", "init", "--name", name }, {
+    title = "Init",
+    on_success = function()
+      util.notify("Project '" .. name .. "' initialized", vim.log.levels.INFO)
+    end,
+  })
 end
 
--- Execute deployment
-M.execute_deployment = function(project_root)
-    vim.notify("Deploying modules...", vim.log.levels.INFO)
-    
-    local cmd = { M.config.aptos_path, "move", "publish", "--package-dir", project_root }
-    
-    job(cmd, {
-        stdout_buffered = true,
-        stderr_buffered = true,
-        on_exit = function(_, exit_code, stdout, stderr)
-            if exit_code == 0 then
-                vim.notify("Deployment successful!", vim.log.levels.INFO)
-                M.parse_deployment_output(stdout)
-            else
-                vim.notify("Deployment failed!", vim.log.levels.ERROR)
-                M.parse_deployment_errors(stderr)
-            end
-        end,
-    })
+function M.account()
+  run_cmd({ "account", "list" }, {
+    title = "Account",
+    on_success = function(output)
+      local lines = vim.split(output, "\n", { trimempty = true })
+      util.open_float(lines, { title = "Account Info" })
+    end,
+  })
 end
 
--- Show account information
-M.show_account_info = function()
-    local cmd = { M.config.aptos_path, "account", "list", "--output", "json" }
-    
-    job(cmd, {
-        stdout_buffered = true,
-        stderr_buffered = true,
-        on_exit = function(_, exit_code, stdout, stderr)
-            if exit_code == 0 then
-                M.parse_account_info(stdout)
-            else
-                vim.notify("Failed to get account info: " .. table.concat(stderr, "\n"), vim.log.levels.ERROR)
-            end
-        end,
-    })
+function M.network(net)
+  if not net then
+    vim.ui.select({ "devnet", "testnet", "mainnet", "local" }, {
+      prompt = "Select network:",
+    }, function(choice)
+      if choice then
+        M.network(choice)
+      end
+    end)
+    return
+  end
+  run_cmd({ "init", "--network", net }, {
+    title = "Network",
+    on_success = function()
+      util.notify("Switched to " .. net, vim.log.levels.INFO)
+    end,
+  })
 end
 
--- Create new account
-M.create_account = function()
-    local cmd = { M.config.aptos_path, "init", "--profile", "default" }
-    
-    vim.notify("Creating new account...", vim.log.levels.INFO)
-    
-    job(cmd, {
-        stdout_buffered = true,
-        stderr_buffered = true,
-        on_exit = function(_, exit_code, stdout, stderr)
-            if exit_code == 0 then
-                vim.notify("Account created successfully!", vim.log.levels.INFO)
-                M.parse_account_creation(stdout)
-            else
-                vim.notify("Failed to create account: " .. table.concat(stderr, "\n"), vim.log.levels.ERROR)
-            end
-        end,
-    })
-end
+-- Exposed for testing
+M._parse_errors = parse_errors
 
--- Switch network
-M.switch_network = function(network)
-    if not network then
-        vim.ui.input({
-            prompt = "Network (local/devnet/testnet/mainnet): ",
-        }, function(input)
-            if input and input ~= "" then
-                M.execute_network_switch(input)
-            end
-        end)
-        return
-    end
-    
-    M.execute_network_switch(network)
-end
-
--- Execute network switch
-M.execute_network_switch = function(network)
-    local valid_networks = { "local", "devnet", "testnet", "mainnet" }
-    local valid = false
-    
-    for _, net in ipairs(valid_networks) do
-        if net == network then
-            valid = true
-            break
-        end
-    end
-    
-    if not valid then
-        vim.notify("Invalid network. Valid options: " .. table.concat(valid_networks, ", "), vim.log.levels.ERROR)
-        return
-    end
-    
-    local cmd = { M.config.aptos_path, "init", "--profile", "default", "--network", network }
-    
-    vim.notify("Switching to " .. network .. "...", vim.log.levels.INFO)
-    
-    job(cmd, {
-        stdout_buffered = true,
-        stderr_buffered = true,
-        on_exit = function(_, exit_code, stdout, stderr)
-            if exit_code == 0 then
-                vim.notify("Switched to " .. network .. " successfully!", vim.log.levels.INFO)
-                M.parse_network_switch(stdout)
-            else
-                vim.notify("Failed to switch network: " .. table.concat(stderr, "\n"), vim.log.levels.ERROR)
-            end
-        end,
-    })
-end
-
--- Show network information
-M.show_network_info = function()
-    local cmd = { M.config.aptos_path, "node", "show-validator-set", "--output", "json" }
-    
-    job(cmd, {
-        stdout_buffered = true,
-        stderr_buffered = true,
-        on_exit = function(_, exit_code, stdout, stderr)
-            if exit_code == 0 then
-                M.parse_network_info(stdout)
-            else
-                vim.notify("Failed to get network info: " .. table.concat(stderr, "\n"), vim.log.levels.ERROR)
-            end
-        end,
-    })
-end
-
--- Initialize new Move project
-M.init_project = function(project_name)
-    if not project_name then
-        vim.ui.input({
-            prompt = "Project name: ",
-        }, function(input)
-            if input and input ~= "" then
-                M.execute_init_project(input)
-            end
-        end)
-        return
-    end
-    
-    M.execute_init_project(project_name)
-end
-
--- Execute project initialization
-M.execute_init_project = function(project_name)
-    local cmd = { M.config.aptos_path, "move", "init", "--name", project_name }
-    
-    vim.notify("Initializing Move project: " .. project_name, vim.log.levels.INFO)
-    
-    job(cmd, {
-        stdout_buffered = true,
-        stderr_buffered = true,
-        on_exit = function(_, exit_code, stdout, stderr)
-            if exit_code == 0 then
-                vim.notify("Project initialized successfully!", vim.log.levels.INFO)
-                M.parse_project_init(stdout)
-            else
-                vim.notify("Failed to initialize project: " .. table.concat(stderr, "\n"), vim.log.levels.ERROR)
-            end
-        end,
-    })
-end
-
--- Add dependency
-M.add_dependency = function(dependency)
-    if not dependency then
-        vim.ui.input({
-            prompt = "Dependency (format: address::module): ",
-        }, function(input)
-            if input and input ~= "" then
-                M.execute_add_dependency(input)
-            end
-        end)
-        return
-    end
-    
-    M.execute_add_dependency(dependency)
-end
-
--- Execute add dependency
-M.execute_add_dependency = function(dependency)
-    local project_root = M.find_project_root()
-    if not project_root then
-        vim.notify("No Move.toml found in current directory or parents", vim.log.levels.ERROR)
-        return
-    end
-    
-    local cmd = { M.config.aptos_path, "move", "add", "--package-dir", project_root, dependency }
-    
-    vim.notify("Adding dependency: " .. dependency, vim.log.levels.INFO)
-    
-    job(cmd, {
-        stdout_buffered = true,
-        stderr_buffered = true,
-        on_exit = function(_, exit_code, stdout, stderr)
-            if exit_code == 0 then
-                vim.notify("Dependency added successfully!", vim.log.levels.INFO)
-                M.parse_dependency_add(stdout)
-            else
-                vim.notify("Failed to add dependency: " .. table.concat(stderr, "\n"), vim.log.levels.ERROR)
-            end
-        end,
-    })
-end
-
--- Show project information
-M.show_project_info = function()
-    local project_root = M.find_project_root()
-    if not project_root then
-        vim.notify("No Move.toml found in current directory or parents", vim.log.levels.ERROR)
-        return
-    end
-    
-    local move_toml_path = project_root .. "/Move.toml"
-    local file = io.open(move_toml_path, "r")
-    if not file then
-        vim.notify("Cannot read Move.toml", vim.log.levels.ERROR)
-        return
-    end
-    
-    local content = file:read("*a")
-    file:close()
-    
-    M.parse_project_info(content, project_root)
-end
-
--- Get current network
-M.get_current_network = function()
-    local cmd = { M.config.aptos_path, "config", "show-global-config", "--output", "json" }
-    
-    local handle = io.popen(table.concat(cmd, " "))
-    local result = handle:read("*a")
-    handle:close()
-    
-    local success, data = pcall(vim.json.decode, result)
-    if success and data.config then
-        return data.config.network or "unknown"
-    end
-    
-    return "unknown"
-end
-
--- Parse functions (to be implemented in separate modules)
-M.parse_build_output = function(output)
-    -- Implementation will be in cli/build.lua
-    vim.notify("Build completed successfully", vim.log.levels.INFO)
-end
-
-M.parse_build_errors = function(errors)
-    -- Implementation will be in cli/build.lua
-    vim.notify("Build failed: " .. table.concat(errors, "\n"), vim.log.levels.ERROR)
-end
-
-M.parse_test_output = function(output)
-    -- Implementation will be in cli/build.lua
-    vim.notify("Tests completed successfully", vim.log.levels.INFO)
-end
-
-M.parse_test_errors = function(errors)
-    -- Implementation will be in cli/build.lua
-    vim.notify("Tests failed: " .. table.concat(errors, "\n"), vim.log.levels.ERROR)
-end
-
-M.parse_deployment_output = function(output)
-    -- Implementation will be in cli/deploy.lua
-    vim.notify("Deployment completed successfully", vim.log.levels.INFO)
-end
-
-M.parse_deployment_errors = function(errors)
-    -- Implementation will be in cli/deploy.lua
-    vim.notify("Deployment failed: " .. table.concat(errors, "\n"), vim.log.levels.ERROR)
-end
-
-M.parse_account_info = function(output)
-    -- Implementation will be in cli/account.lua
-    vim.notify("Account info retrieved", vim.log.levels.INFO)
-end
-
-M.parse_account_creation = function(output)
-    -- Implementation will be in cli/account.lua
-    vim.notify("Account created successfully", vim.log.levels.INFO)
-end
-
-M.parse_network_switch = function(output)
-    -- Implementation will be in cli/account.lua
-    vim.notify("Network switched successfully", vim.log.levels.INFO)
-end
-
-M.parse_network_info = function(output)
-    -- Implementation will be in cli/account.lua
-    vim.notify("Network info retrieved", vim.log.levels.INFO)
-end
-
-M.parse_project_init = function(output)
-    -- Implementation will be in cli/project.lua
-    vim.notify("Project initialized successfully", vim.log.levels.INFO)
-end
-
-M.parse_dependency_add = function(output)
-    -- Implementation will be in cli/project.lua
-    vim.notify("Dependency added successfully", vim.log.levels.INFO)
-end
-
-M.parse_project_info = function(content, project_root)
-    -- Implementation will be in cli/project.lua
-    vim.notify("Project info retrieved", vim.log.levels.INFO)
-end
-
-return M 
+return M
